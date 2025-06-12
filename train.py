@@ -30,6 +30,8 @@ import os
 from models import DiT_models
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
+from torch.utils.tensorboard import SummaryWriter
+
 
 
 #################################################################################
@@ -131,10 +133,13 @@ def main(args):
         experiment_dir = f"{args.results_dir}/{experiment_index:03d}-{model_string_name}"  # Create an experiment folder
         checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
         os.makedirs(checkpoint_dir, exist_ok=True)
+        tb_writer = SummaryWriter(log_dir=os.path.join(experiment_dir, "tensorboard"))
+
         logger = create_logger(experiment_dir)
         logger.info(f"Experiment directory created at {experiment_dir}")
     else:
         logger = create_logger(None)
+        tb_writer = None  # Dummy writer for non-master processes
 
     # Create model:
     assert args.image_size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
@@ -224,6 +229,10 @@ def main(args):
                 dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
                 avg_loss = avg_loss.item() / dist.get_world_size()
                 logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
+                if tb_writer is not None:
+                    tb_writer.add_scalar("Loss/train", avg_loss, train_steps)
+                    tb_writer.add_scalar("Speed/steps_per_sec", steps_per_sec, train_steps)
+
                 # Reset monitoring variables:
                 running_loss = 0
                 log_steps = 0
@@ -247,6 +256,9 @@ def main(args):
     # do any sampling/FID calculation/etc. with ema (or model) in eval mode ...
 
     logger.info("Done!")
+    if tb_writer is not None:
+        tb_writer.close()
+
     cleanup()
 
 
