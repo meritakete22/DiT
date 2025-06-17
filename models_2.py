@@ -14,7 +14,8 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
-
+import torchvision.models as models
+from torchvision.models.resnet import ResNet50_Weights
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
@@ -64,35 +65,27 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
-class LabelEmbedder(nn.Module):
-    """
-    Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
-    """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+
+class ImageEmbedder(nn.Module):
+    def __init__(self, hidden_size):
         super().__init__()
-        use_cfg_embedding = dropout_prob > 0
-        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
-        self.num_classes = num_classes
-        self.dropout_prob = dropout_prob
-
-    def token_drop(self, labels, force_drop_ids=None):
-        """
-        Drops labels to enable classifier-free guidance.
-        """
-        if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-        else:
-            drop_ids = force_drop_ids == 1
-        labels = torch.where(drop_ids, self.num_classes, labels)
-        return labels
-
-    def forward(self, labels, train, force_drop_ids=None):
-        use_dropout = self.dropout_prob > 0
-        if (train and use_dropout) or (force_drop_ids is not None):
-            labels = self.token_drop(labels, force_drop_ids)
-        embeddings = self.embedding_table(labels)
-        return embeddings
-
+        # Load pre-trained ResNet-50
+        resnet = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+        
+        # Remove the final classification layer
+        self.feature_extractor = nn.Sequential(
+            *list(resnet.children())[:-1]  # Keep all layers except the last FC layer
+        )
+        
+        # Projection layer to match DiT's hidden size
+        self.projection = nn.Linear(2048, hidden_size)
+        
+    def forward(self, x):
+        # Input: (B, 3, 224, 224)
+        features = self.feature_extractor(x)  # Output: (B, 2048, 1, 1)
+        features = features.view(features.size(0), -1)  # Flatten to (B, 2048)
+        return self.projection(features)  # Output: (B, hidden_size) = embedings
+    
 
 #################################################################################
 #                                 Core DiT Model                                #
@@ -155,8 +148,6 @@ class DiT(nn.Module):
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
-        class_dropout_prob=0.1,
-        num_classes=1000,
         learn_sigma=True,
     ):
         super().__init__()
@@ -168,7 +159,7 @@ class DiT(nn.Module):
 
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        self.image_embedder = ImageEmbedder(hidden_size)
         
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
@@ -199,7 +190,11 @@ class DiT(nn.Module):
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
         # Initialize label embedding table:
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        # nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+
+        # Initialize image embedding:
+        nn.init.normal_(self.image_embedder.projection.weight, std=0.02)
+        nn.init.constant_(self.image_embedder.projection.bias, 0)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -215,6 +210,7 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
+    
 
     def unpatchify(self, x):
         """
@@ -231,31 +227,32 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y):
+    def forward(self, x, t, cond_img):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
-        y: (N,) tensor of class labels
+        cond_img: (N, C, H, W) conditioning images
         """
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        t = self.t_embedder(t)                   # (N, D)
-        y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y                                # (N, D)
+        x = self.x_embedder(x) + self.pos_embed                  # (N, T, D), where T = H * W / patch_size ** 2
+        t = self.t_embedder(t)                                   # (N, D)
+        img_emb = self.image_embedder(cond_img, self.training)   # (N, D)
+        c = t + img_emb                                          # (N, D)
         for block in self.blocks:
-            x = block(x, c)                      # (N, T, D)
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
+            x = block(x, c)                                      # (N, T, D)
+        x = self.final_layer(x, c)                               # (N, T, patch_size ** 2 * out_channels)
+        x = self.unpatchify(x)                                   # (N, out_channels, H, W)
         return x
 
-    def forward_with_cfg(self, x, t, y, cfg_scale):
+    def forward_with_cfg(self, x, t, cond_img, cfg_scale):
         """
         Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        comb_cond = torch.cat([cond_img, cond_img], dim=0) if cond_img is not None else None
+        model_out = self.forward(combined, t, comb_cond)    
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
