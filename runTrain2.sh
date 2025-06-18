@@ -3,7 +3,7 @@
 nohup torchrun \
   --nnodes=1 \
   --nproc_per_node=1 \
-  train.py \
+  train_2.py \
   --model DiT-S/8 \
   --data-path /mnt/shared_dir/datasets/ImageNet/ILSVRC/Data/CLS-LOC/train \
   --num-conditioning-images 100 \

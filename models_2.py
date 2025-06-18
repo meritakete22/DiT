@@ -238,7 +238,7 @@ class DiT(nn.Module):
 
         x = self.x_embedder(x) + self.pos_embed                  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t)                                   # (N, D)
-        img_emb = self.image_embedder(cond_img, self.training)   # (N, D)
+        img_emb = self.image_embedder(cond_img)   # (N, D)
         c = t + img_emb                                          # (N, D)
         for block in self.blocks:
             x = block(x, c)                                      # (N, T, D)

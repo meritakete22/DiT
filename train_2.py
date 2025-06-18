@@ -37,8 +37,6 @@ from torchvision.models.resnet import ResNet50_Weights
 import torch.nn as nn
 from torch.utils.data import Subset
 
-
-
 #################################################################################
 #                             Training Helper Functions                         #
 #################################################################################
@@ -307,7 +305,7 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
     parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
-    parser.add_argument("--epochs", type=int, default=1400)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=0)
     parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  # Choice doesn't affect training
