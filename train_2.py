@@ -109,38 +109,21 @@ def center_crop_arr(pil_image, image_size):
     crop_x = (arr.shape[1] - image_size) // 2
     return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
 
-def precompute_resnet_features(image_paths, device="cpu", image_size=256):
-    """Precompute ResNet-50 features for conditioning images"""
-    resnet = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-    resnet.fc = nn.Identity()  # Remove classification head
-    resnet.eval().to(device)
-    
+
+#################################################################################
+#                             Conditioning Image Paths                          #
+#################################################################################
+
+def load_conditioning_images(path, num_images, image_size):
+    image_paths = sorted(glob(os.path.join(path, "*")))[:num_images]
     preprocess = transforms.Compose([
-        transforms.Resize(image_size),
-        transforms.CenterCrop(224),
+        transforms.Resize(224),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                              std=[0.229, 0.224, 0.225]),
     ])
-    
-    features = []
-    for path in image_paths:
-        img = Image.open(path).convert("RGB")
-        img_tensor = preprocess(img).unsqueeze(0).to(device)
-        with torch.no_grad():
-            feat = resnet(img_tensor)
-        features.append(feat.squeeze(0))
-        
-    return torch.stack(features)
-
-def load_conditioning_image_paths(directory, max_images=100):
-    """Load paths of conditioning images from directory"""
-    extensions = ("jpg", "jpeg", "png", "bmp")
-    paths = []
-    for ext in extensions:
-        paths.extend(glob(os.path.join(directory, f"*.{ext}")))
-        paths.extend(glob(os.path.join(directory, f"*.{ext.upper()}")))
-    return sorted(paths)[:max_images]
+    images = [preprocess(Image.open(p).convert("RGB")) for p in image_paths]
+    return torch.stack(images)  # shape: [num_images, 3, H, W]
 
 #################################################################################
 #                                  Training Loop                                #
@@ -185,7 +168,7 @@ def main(args):
     latent_size = args.image_size // 8
     model = DiT_models[args.model](
         input_size=latent_size,
-        num_conditioning_images=args.num_conditioning_images,
+        # num_conditioning_images=args.num_conditioning_images,
     )
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
@@ -206,21 +189,12 @@ def main(args):
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
     ])
 
-    transform_conditioning = transforms.Compose([
-        transforms.Resize(224),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                             std=[0.229, 0.224, 0.225]),
-    ])
-
     dataset = ImageFolder(args.data_path, transform=transform)
-    
-    cond_all = sorted(glob(os.path.join(args.conditioning_path, "*")))
-    cond_paths = cond_all[:args.num_conditioning_images]
+    cond_imgs = load_conditioning_images(args.conditioning_path, args.num_conditioning_images, args.image_size).to(device)
 
-    cond_ds = ImageFolder(args.conditioning_path, transform=transform_conditioning)
-    n = min(args.num_classes, len(cond_ds))  # Ensure we don't exceed the number of classes
-    cond_ds = Subset(cond_ds, range(n))
+    # cond_ds = ImageFolder(args.conditioning_path, transform=transform_conditioning)
+    # n = min(args.num_classes, len(cond_ds))  # Ensure we don't exceed the number of classes
+    # cond_ds = Subset(cond_ds, range(n))
 
     sampler = DistributedSampler(
         dataset,
@@ -239,7 +213,7 @@ def main(args):
         drop_last=True
     )
     logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
-    logger.info(f"Conditioning images: {len(cond_paths):,} images ({args.conditioning_path})")
+    logger.info(f"Conditioning images: {len(cond_imgs):,} images ({args.conditioning_path})")
 
     # Prepare models for training:
     update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
@@ -258,25 +232,17 @@ def main(args):
         logger.info(f"Beginning epoch {epoch}...")
         for x, _ in loader:
             x = x.to(device)
-            # Randomly select conditioning images:
-            # path = cond_paths[torch.randint(0, len(cond_paths), (x.shape[0],), device=device)]
-            # cond_imgs = []
-            # for p in path:
-            #     img = Image.open(p).convert("RGB")
-            #     img = transform_conditioning(img)
-            #     cond_imgs.append(img)
-            # cond = torch.stack(cond_imgs, dim=0).to(device)
 
             with torch.no_grad():
                 # Map input images to latent space + normalize latents:
                 x = vae.encode(x).latent_dist.sample().mul_(0.18215)
-                # cond = vae.encode(cond).latent_dist.sample().mul_(0.18215)
 
             # path es un LongTensor con valores en [0, num_cond_imgs)
-            cond = torch.randint(0, len(cond_paths), (x.shape[0],), device=device)
+            idx = torch.randint(0, cond_imgs.shape[0], (x.shape[0],), device=device)
+            cond = cond_imgs[idx]
 
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            model_kwargs = dict(image_ids=cond)
+            model_kwargs = dict(cond_img=cond)
             loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
             loss = loss_dict["loss"].mean()
             opt.zero_grad()
@@ -335,7 +301,7 @@ if __name__ == "__main__":
     # Default args here will train DiT-XL/2 with the hyperparameters we used in our paper (except training iters).
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
-    parser.add_argument("--num-conditioning-images", type=int, default=100)
+    parser.add_argument("--num-conditioning-images", type=int, default=10)
     parser.add_argument("--conditioning-path", type=str, required=True) 
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")

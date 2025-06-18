@@ -234,6 +234,8 @@ class DiT(nn.Module):
         t: (N,) tensor of diffusion timesteps
         cond_img: (N, C, H, W) conditioning images
         """
+        print("Cond_img received with shape:", cond_img.shape)
+
         x = self.x_embedder(x) + self.pos_embed                  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t)                                   # (N, D)
         img_emb = self.image_embedder(cond_img, self.training)   # (N, D)
