@@ -10,4 +10,5 @@ nohup torchrun \
   --conditioning-path /mnt/shared_dir/datasets/ImageNet/ILSVRC/Data/CLS-LOC/test \
   --results-dir ./results \
   --global-batch-size 32 \
+  --num-epochs 10 \
   >> results_s8_32_3.txt 2>&1 &
