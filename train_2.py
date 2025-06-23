@@ -172,12 +172,31 @@ def main(args):
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
     model = DDP(model.to(device), device_ids=[rank])
+    checkpoint_dir = args.checkpoint
+    if checkpoint_dir is not None:
+        ckpt = torch.load(checkpoint_dir, map_location=device)
+        logger.info(f"Loaded model from {checkpoint_dir}")
+        model.module.load_state_dict(ckpt["model"], strict=False)
+
+        for param in model.parameters():
+            param.requires_grad = False
+
+        for param in model.module.image_embedder.parameters():
+            param.requires_grad = True
+
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
+    if args.checkpoint is None:
+        opt = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
+    else:
+        opt = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=1e-4,
+            weight_decay=0
+        )
 
     # Setup data:
     transform = transforms.Compose([
@@ -312,5 +331,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument("--ckpt-every", type=int, default=50_000)
+    parser.add_argument("--checkpoint", type=str, default=None,
+                    help="Path to a pre-trained DiT checkpoint to load (optional). If not provided")
     args = parser.parse_args()
     main(args)

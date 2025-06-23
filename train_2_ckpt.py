@@ -292,7 +292,7 @@ def main(args):
                     con = denormalize(cond[0].cpu())
                     
                     grid_inp  = torchvision.utils.make_grid(inp,  normalize=False)
-                    grid_cond = torchvision.utils.make_grid(cond, normalize=False)
+                    grid_cond = torchvision.utils.make_grid(con, normalize=False)
 
                     with torch.no_grad():
 
@@ -300,7 +300,7 @@ def main(args):
 
                         sample_latent = diffusion.p_sample_loop(
                             ema.module.forward_with_cfg, z.shape, z, clip_denoised=False,
-                            model_kwargs=dict(cond_img=cond[0:1].to(device), cfg_scale=1.0),
+                            model_kwargs=dict(cond_img=con[0:1].to(device), cfg_scale=1.0),
                             progress=False, device=device
                         )
                         pred = vae.decode(sample_latent / 0.18215).sample
