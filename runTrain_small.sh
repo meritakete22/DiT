@@ -10,4 +10,5 @@ nohup torchrun \
   --conditioning-path /mnt/shared_dir/scratch/tfm_luis/DiT/Data/Test \
   --results-dir ./results \
   --global-batch-size 32 \
-  > results_s8_32_small_1.txt 2>&1 &
+  --checkpoint DiT-XL-2-256x256.pt \
+  >> output_s8_32_small_2.txt 2>&1 &
